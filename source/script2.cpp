@@ -7251,7 +7251,7 @@ ResultType Line::StringSplit(LPTSTR aArrayName, LPTSTR aInputString, LPTSTR aDel
 
 
 BIF_DECL(BIF_StrSplit)
-// Array := StrSplit(String [, Delimiters, OmitChars])
+// Array := StrSplit(String [, Delimiters, OmitChars, MaxParts])
 // This is the v2 version of Line::StringSplit(), and as such, is kept separate from Line::StringSplit().
 // Unlike StringSplit, this function allows an array of Delimiters (vs a string of delimiter characters).
 {
@@ -7259,6 +7259,7 @@ BIF_DECL(BIF_StrSplit)
 	LPTSTR *aDelimiterList = NULL;
 	int aDelimiterCount = 0;
 	LPTSTR aOmitList = _T("");
+	int splits_left = -2;
 
 	if (aParamCount > 1)
 	{
@@ -7283,7 +7284,11 @@ BIF_DECL(BIF_StrSplit)
 			aDelimiterCount = **aDelimiterList != '\0'; // i.e. non-empty string.
 		}
 		if (aParamCount > 2)
+		{
 			aOmitList = TokenToString(*aParam[2]);
+			if (aParamCount > 3)
+				splits_left = (int)TokenToInt64(*aParam[3]) - 1;
+		}
 	}
 	
 	Object *output_array = Object::Create();
@@ -7292,7 +7297,8 @@ BIF_DECL(BIF_StrSplit)
 	aResultToken.symbol = SYM_OBJECT;	// Set default, overridden only for critical errors.
 	aResultToken.object = output_array;	//
 
-	if (!*aInputString) // The input variable is blank, thus there will be zero elements.
+	if (!*aInputString // The input variable is blank, thus there will be zero elements.
+		|| splits_left == -1) // The caller specified 0 parts.
 		return;
 	
 	if (aDelimiterCount) // The user provided a list of delimiters, so process the input variable normally.
@@ -7301,7 +7307,8 @@ BIF_DECL(BIF_StrSplit)
 		size_t element_length, delimiter_length;
 		for (contents_of_next_element = aInputString; ; )
 		{
-			if (delimiter = InStrAny(contents_of_next_element, aDelimiterList, aDelimiterCount, delimiter_length)) // A delimiter was found.
+			if (   splits_left // No limit, or limit not reached yet.
+				&& (delimiter = InStrAny(contents_of_next_element, aDelimiterList, aDelimiterCount, delimiter_length))   ) // A delimiter was found.
 			{
 				element_length = delimiter - contents_of_next_element;
 				if (*aOmitList && element_length > 0)
@@ -7316,6 +7323,8 @@ BIF_DECL(BIF_StrSplit)
 				if (!output_array->Append(contents_of_next_element, element_length))
 					break;
 				contents_of_next_element = delimiter + delimiter_length;  // Omit the delimiter since it's never included in contents.
+				if (splits_left > 0)
+					--splits_left;
 			}
 			else // the entire length of contents_of_next_element is what will be stored
 			{
@@ -10914,6 +10923,16 @@ VarSizeType BIV_BatchLines(LPTSTR aBuf, LPTSTR aVarName)
 	return (VarSizeType)_tcslen(target_buf);
 }
 
+BIV_DECL_R(BIV_ListLines)
+{
+	if (aBuf)
+	{
+		*aBuf++ = g->ListLinesIsEnabled ? '1' : '0';
+		*aBuf = '\0';
+	}
+	return 1;
+}
+
 VarSizeType BIV_TitleMatchMode(LPTSTR aBuf, LPTSTR aVarName)
 {
 	if (g->TitleMatchMode == FIND_REGEX) // v1.0.45.
@@ -11804,20 +11823,32 @@ VarSizeType BIV_ScriptHwnd(LPTSTR aBuf, LPTSTR aVarName)
 	return MAX_INTEGER_LENGTH;
 }
 
+
+LineNumberType Script::CurrentLine()
+{
+	return mCurrLine ? mCurrLine->mLineNumber : mCombinedLineNumber;
+}
+
 VarSizeType BIV_LineNumber(LPTSTR aBuf, LPTSTR aVarName)
 // Caller has ensured that g_script.mCurrLine is not NULL.
 {
 	return aBuf
-		? (VarSizeType)_tcslen(ITOA(g_script.mCurrLine->mLineNumber, aBuf))
+		? (VarSizeType)_tcslen(ITOA(g_script.CurrentLine(), aBuf))
 		: MAX_INTEGER_LENGTH;
+}
+
+
+LPTSTR Script::CurrentFile()
+{
+	return Line::sSourceFile[mCurrLine ? mCurrLine->mFileIndex : mCurrFileIndex];
 }
 
 VarSizeType BIV_LineFile(LPTSTR aBuf, LPTSTR aVarName)
 // Caller has ensured that g_script.mCurrLine is not NULL.
 {
 	if (aBuf)
-		_tcscpy(aBuf, Line::sSourceFile[g_script.mCurrLine->mFileIndex]);
-	return (VarSizeType)_tcslen(Line::sSourceFile[g_script.mCurrLine->mFileIndex]);
+		_tcscpy(aBuf, g_script.CurrentFile());
+	return (VarSizeType)_tcslen(g_script.CurrentFile());
 }
 
 
@@ -12449,12 +12480,19 @@ VarSizeType BIV_TimeIdlePhysical(LPTSTR aBuf, LPTSTR aVarName)
 // hotkey.h and globaldata.h, which can't be easily included in script.h due to
 // mutual dependency issues.
 {
-	// If neither hook is active, default this to the same as the regular idle time:
-	if (!(g_KeybdHook || g_MouseHook))
+	DWORD time_last_input;
+	switch (toupper(aVarName[10]))
+	{
+	case 'M': time_last_input = g_MouseHook ? g_TimeLastInputMouse : 0; break;
+	case 'K': time_last_input = g_KeybdHook ? g_TimeLastInputKeyboard : 0; break;
+	default: time_last_input = (g_KeybdHook || g_MouseHook) ? g_TimeLastInputPhysical : 0; break;
+	}
+	// If the relevant hook is not active, default this to the same as the regular idle time:
+	if (!time_last_input)
 		return BIV_TimeIdle(aBuf, _T(""));
 	if (!aBuf)
 		return MAX_INTEGER_LENGTH; // IMPORTANT: Conservative estimate because tick might change between 1st & 2nd calls.
-	return (VarSizeType)_tcslen(ITOA64(GetTickCount() - g_TimeLastInputPhysical, aBuf)); // Switching keyboard layouts/languages sometimes sees to throw off the timestamps of the incoming events in the hook.
+	return (VarSizeType)_tcslen(ITOA64(GetTickCount() - time_last_input, aBuf)); // Switching keyboard layouts/languages sometimes sees to throw off the timestamps of the incoming events in the hook.
 }
 
 
