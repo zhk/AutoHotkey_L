@@ -103,6 +103,9 @@
     <ClCompile Include="source\script_com.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="source\input_object.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\application.h">
@@ -195,6 +198,9 @@
     <ClInclude Include="source\script_func_impl.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="source\input_object.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="source\resources\icon_filetype.ico">
@@ -237,5 +243,8 @@
     <CustomBuild Include="source\resources\AutoHotkey.exe.manifest">
       <Filter>Resource Files</Filter>
     </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Natvis Include="debug.natvis" />
   </ItemGroup>
 </Project>

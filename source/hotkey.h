@@ -22,27 +22,33 @@ GNU General Public License for more details.
 EXTERN_SCRIPT;  // For g_script.
 
 // Due to control/alt/shift modifiers, quite a lot of hotkey combinations are possible, so support any
-// conceivable use.  Note: Increasing this value will increase the memory required (i.e. any arrays
-// that use this value):
-#define MAX_HOTKEYS 1000  // Raised from 700 to 1000 in v1.0.48 because at least one person needed more.
+// conceivable use.  This value is used for initial sizing of the shk array, which doubles in size each
+// time its capacity is reached (making the need for expansion rare).
+#define INITIAL_MAX_HOTKEYS 256
 
 // Note: 0xBFFF is the largest ID that can be used with RegisterHotkey().
-// But further limit this to 0x3FFF (16,383) so that the two highest order bits
-// are reserved for our other uses:
-#define HOTKEY_FUTURE_USE              0x8000  // Formerly HOTKEY_NO_SUPPRESS but no longer needed for that.
-#define HOTKEY_KEY_UP                  0x4000
-#define HOTKEY_ID_MASK                 0x3FFF
+// But further limit this to 0x7FFF (32,767) so that the highest order bit
+// is reserved for our other use:
+#define HOTKEY_KEY_UP                  0x8000
+#define HOTKEY_ID_MASK                 0x7FFF
 #define HOTKEY_ID_INVALID              HOTKEY_ID_MASK
-#define HOTKEY_ID_ALT_TAB              0x3FFE
-#define HOTKEY_ID_ALT_TAB_SHIFT        0x3FFD
-#define HOTKEY_ID_ALT_TAB_MENU         0x3FFC
-#define HOTKEY_ID_ALT_TAB_AND_MENU     0x3FFB
-#define HOTKEY_ID_ALT_TAB_MENU_DISMISS 0x3FFA
-#define HOTKEY_ID_MAX                  0x3FF9  // 16377 hotkeys
+#define HOTKEY_ID_ALT_TAB              0x7FFE
+#define HOTKEY_ID_ALT_TAB_SHIFT        0x7FFD
+#define HOTKEY_ID_ALT_TAB_MENU         0x7FFC
+#define HOTKEY_ID_ALT_TAB_AND_MENU     0x7FFB
+#define HOTKEY_ID_ALT_TAB_MENU_DISMISS 0x7FFA
+#define HOTKEY_ID_MAX                  0x7FF9  // 32762 hotkeys
 #define HOTKEY_ID_ON                   0x01  // This and the next 2 are used only for convenience by ConvertAltTab().
 #define HOTKEY_ID_OFF                  0x02
 #define HOTKEY_ID_TOGGLE               0x03
 #define IS_ALT_TAB(id) (id > HOTKEY_ID_MAX && id < HOTKEY_ID_INVALID)
+
+// Below: Use double-colon as delimiter to set these apart from normal labels.
+// The main reason for this is that otherwise the user would have to worry
+// about a normal label being unintentionally valid as a hotkey, e.g. "Shift:"
+// might be a legitimate label that the user forgot is also a valid hotkey:
+#define HOTKEY_FLAG _T("::")
+#define HOTKEY_FLAG_LENGTH 2
 
 #define COMPOSITE_DELIMITER _T(" & ")
 #define COMPOSITE_DELIMITER_LENGTH 3
@@ -145,18 +151,22 @@ private:
 	~Hotkey() {if (mIsRegistered) Unregister();}
 
 public:
-	static Hotkey *shk[MAX_HOTKEYS];
+	static Hotkey **shk;
+	static int shkMax;
+
+	// 32-bit members:
+	mod_type mModifiers;  // MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, or some additive or bitwise-or combination of these.
+
+	// 16-bit members:
 	HotkeyIDType mID;  // Must be unique for each hotkey of a given thread.
 	HookActionType mHookAction;
-
-	LPTSTR mName; // Points to the label name for static hotkeys, or a dynamically-allocated string for dynamic hotkeys.
 	sc_type mSC; // Scan code.  All vk's have a scan code, but not vice versa.
 	sc_type mModifierSC; // If mModifierVK is zero, this scan code, if non-zero, will be used as the modifier.
-	mod_type mModifiers;  // MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, or some additive or bitwise-or combination of these.
-	modLR_type mModifiersLR;  // Left-right centric versions of the above.
-	modLR_type mModifiersConsolidatedLR; // The combination of mModifierVK, mModifierSC, mModifiersLR, modifiers
+	HotkeyIDType mNextHotkey; // ID of the next hotkey with the same suffix as this one (initialized by the hook).
 
 	// Keep single-byte attributes adjacent to each other to conserve memory within byte-aligned class/struct:
+	modLR_type mModifiersLR;  // Left-right centric versions of the above.
+	modLR_type mModifiersConsolidatedLR; // The combination of mModifierVK, mModifierSC, mModifiersLR, modifiers
 	vk_type mVK; // virtual-key code, e.g. VK_TAB, VK_LWIN, VK_LMENU, VK_APPS, VK_F10.  If zero, use sc below.
 	vk_type mModifierVK; // Any other virtual key that must be pressed down in order to activate "vk" itself.
 	HotkeyTypeType mType;
@@ -166,19 +176,17 @@ public:
 	#define NO_SUPPRESS_NEXT_UP_EVENT 0x08        // Bitwise: Bit #4
 	#define NO_SUPPRESS_SUFFIX_VARIES (AT_LEAST_ONE_VARIANT_HAS_TILDE | AT_LEAST_ONE_VARIANT_LACKS_TILDE) // i.e. a hotkey that has variants of both types.
 	#define NO_SUPPRESS_STATES NO_SUPPRESS_NEXT_UP_EVENT  // This is a bitwise union (currently only one item) of those of the above that represent a the key's dynamically changing state as the user types.
-
 	UCHAR mNoSuppress;  // Uses the flags above.  Normally 0, but can be overridden by using the hotkey tilde (~) prefix).
 	bool mKeybdHookMandatory;
 	bool mAllowExtraModifiers;  // False if the hotkey should not fire when extraneous modifiers are held down.
 	bool mKeyUp; // A hotkey that should fire on key-up.
 	bool mVK_WasSpecifiedByNumber; // A hotkey defined by something like "VK24::" or "Hotkey, VK24, ..."
-#ifdef CONFIG_WIN9X
-	bool mUnregisterDuringThread; // Win9x: Whether this hotkey should be unregistered during its own subroutine (to prevent its own Send command from firing itself).  Seems okay to apply this to all variants.
-#endif
 	bool mIsRegistered;  // Whether this hotkey has been successfully registered.
 	bool mParentEnabled; // When true, the individual variants' mEnabled flags matter. When false, the entire hotkey is disabled.
 	bool mConstructedOK;
-
+	
+	// 64- or 32-bit members:
+	LPTSTR mName; // Points to the label name for static hotkeys, or a dynamically-allocated string for dynamic hotkeys.
 	HotkeyVariant *mFirstVariant, *mLastVariant; // v1.0.42: Linked list of variant hotkeys created via #IfWin directives.
 
 	// Make sHotkeyCount an alias for sNextID.  Make it const to enforce modifying the value in only one way:
@@ -194,7 +202,7 @@ public:
 	#define HOTKEY_EL_ALTTAB             _T("4")
 	#define HOTKEY_EL_NOTEXIST           _T("5")
 	#define HOTKEY_EL_NOTEXISTVARIANT    _T("6")
-	#define HOTKEY_EL_WIN9X              _T("50")
+	//#define HOTKEY_EL_WIN9X              _T("50") // Reserved; no longer used.
 	#define HOTKEY_EL_NOREG              _T("51")
 	#define HOTKEY_EL_MAXCOUNT           _T("98") // 98 allows room for other ErrorLevels to be added in between.
 	#define HOTKEY_EL_MEM                _T("99")
@@ -213,6 +221,7 @@ public:
 	void PerformInNewThreadMadeByCaller(HotkeyVariant &aVariant);
 	static void ManifestAllHotkeysHotstringsHooks();
 	static void RequireHook(HookType aWhichHook) {sWhichHookAlways |= aWhichHook;}
+	static void MaybeUninstallHook();
 	static ResultType TextInterpret(LPTSTR aName, Hotkey *aThisHotkey, bool aUseErrorLevel);
 
 	struct HotkeyProperties // Struct used by TextToModifiers() and its callers.
@@ -350,7 +359,7 @@ public:
 	#define HS_TEMPORARILY_DISABLED 0x04
 	UCHAR mExistingThreads, mMaxThreads;
 	bool mCaseSensitive, mConformToCase, mDoBackspace, mOmitEndChar, mEndCharRequired
-		, mDetectWhenInsideWord, mDoReset, mExecuteAction, mConstructedOK;
+		, mDetectWhenInsideWord, mDoReset, mConstructedOK;
 
 	static void SuspendAll(bool aSuspend);
 	ResultType PerformInNewThreadMadeByCaller();

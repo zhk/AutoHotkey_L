@@ -55,11 +55,6 @@ static bool sFirstCallForThisEvent;  //
 static bool sInBlindMode;            //
 static DWORD sThisEventTime;         //
 
-// Dynamically resolve SendInput() because otherwise the app won't launch at all on Windows 95/NT-pre-SP3:
-typedef UINT (WINAPI *MySendInputType)(UINT, LPINPUT, int);
-static MySendInputType sMySendInput = (MySendInputType)GetProcAddress(GetModuleHandle(_T("user32")), "SendInput");
-// Above will be NULL for Win95/NT-pre-SP3.
-
 
 void DisguiseWinAltIfNeeded(vk_type aVK)
 // For v1.0.25, the following situation is fixed by the code below: If LWin or LAlt
@@ -160,6 +155,13 @@ void SendKeys(LPTSTR aKeys, SendRawModes aSendRaw, SendModes aSendModeOrig, HWND
 		// But Send {Blind}{LControl down} will generate the extra events even if ctrl already down.
 		aKeys += 7; // Remove "{Blind}" from further consideration.
 
+	if (!aSendRaw && !_tcsnicmp(aKeys, _T("{Text}"), 6))
+	{
+		// Setting this early allows CapsLock and the Win+L workaround to be skipped:
+		aSendRaw = SCM_RAW_TEXT;
+		aKeys += 6;
+	}
+
 	int orig_key_delay = g.KeyDelay;
 	int orig_press_duration = g.PressDuration;
 	if (aSendModeOrig == SM_INPUT || aSendModeOrig == SM_INPUT_FALLBACK_TO_PLAY) // Caller has ensured aTargetWindow==NULL for SendInput and SendPlay modes.
@@ -170,8 +172,7 @@ void SendKeys(LPTSTR aKeys, SendRawModes aSendRaw, SendModes aSendModeOrig, HWND
 		// just designed to add a lot of value for typical usage because SendInput is preferred due to it
 		// being considerably faster than SendPlay, especially for long replacements when the CPU is under
 		// heavy load.
-		if (   !sMySendInput // Win95/NT-pre-SP3 don't support SendInput, so fall back to the specified mode.
-			|| SystemHasAnotherKeybdHook() // This function has been benchmarked to ensure it doesn't yield our timeslice, etc.  200 calls take 0ms according to tick-count, even when CPU is maxed.
+		if (   SystemHasAnotherKeybdHook() // This function has been benchmarked to ensure it doesn't yield our timeslice, etc.  200 calls take 0ms according to tick-count, even when CPU is maxed.
 			|| !aSendRaw && SystemHasAnotherMouseHook() && tcscasestr(aKeys, _T("{Click"))   ) // Ordered for short-circuit boolean performance.  v1.0.43.09: Fixed to be strcasestr vs. !strcasestr
 		{
 			// Need to detect in advance what type of array to build (for performance and code size).  That's why
@@ -235,6 +236,7 @@ void SendKeys(LPTSTR aKeys, SendRawModes aSendRaw, SendModes aSendModeOrig, HWND
 			&& (GetTickCount() - g_script.mThisHotkeyStartTime) < (DWORD)50 // Ensure g_script.mThisHotkeyModifiersLR is up-to-date enough to be reliable.
 			&& aSendModeOrig != SM_PLAY // SM_PLAY is reported to be incapable of locking the computer.
 			&& !sInBlindMode // The philosophy of blind-mode is that the script should have full control, so don't do any waiting during blind mode.
+			&& aSendRaw != SCM_RAW_TEXT // {Text} mode does not trigger Win+L.
 			&& g_os.IsWinVistaOrLater() // Only Vista (and presumably later OSes) check the physical state of the Windows key for Win+L.
 			&& GetCurrentThreadId() == g_MainThreadID // Exclude the hook thread because it isn't allowed to call anything like MsgSleep, nor are any calls from the hook thread within the understood/analyzed scope of this workaround.
 			)
@@ -372,23 +374,11 @@ void SendKeys(LPTSTR aKeys, SendRawModes aSendRaw, SendModes aSendModeOrig, HWND
 	// The default behavior is to turn the capslock key off prior to sending any keys
 	// because otherwise lowercase letters would come through as uppercase and vice versa.
 	ToggleValueType prior_capslock_state;
-	if (threads_are_attached || !g_os.IsWin9x())
-	{
-		// Only under either of the above conditions can the state of Capslock be reliably
-		// retrieved and changed.  Remember that apps like MS Word have an auto-correct feature that
-		// might make it wrongly seem that the turning off of Capslock below needs a Sleep(0) to take effect.
-		prior_capslock_state = g.StoreCapslockMode && !sInBlindMode
-			? ToggleKeyState(VK_CAPITAL, TOGGLED_OFF)
-			: TOGGLE_INVALID; // In blind mode, don't do store capslock (helps remapping and also adds flexibility).
-	}
-	else // OS is Win9x and threads are not attached.
-	{
-		// Attempt to turn off capslock, but never attempt to turn it back on because we can't
-		// reliably detect whether it was on beforehand.  Update: This didn't do any good, so
-		// it's disabled for now:
-		//CapslockOffWin9x();
-		prior_capslock_state = TOGGLE_INVALID;
-	}
+	// Remember that apps like MS Word have an auto-correct feature that might make it
+	// wrongly seem that the turning off of Capslock below needs a Sleep(0) to take effect.
+	prior_capslock_state = g.StoreCapslockMode && !sInBlindMode && aSendRaw != SCM_RAW_TEXT
+		? ToggleKeyState(VK_CAPITAL, TOGGLED_OFF)
+		: TOGGLE_INVALID; // In blind mode, don't do store capslock (helps remapping and also adds flexibility).
 
 	// sSendMode must be set only after setting Capslock state above, because the hook method
 	// is incapable of changing the on/off state of toggleable keys like Capslock.
@@ -416,7 +406,7 @@ void SendKeys(LPTSTR aKeys, SendRawModes aSendRaw, SendModes aSendModeOrig, HWND
 
 	bool blockinput_prev = g_BlockInput;
 	bool do_selective_blockinput = (g_BlockInputMode == TOGGLE_SEND || g_BlockInputMode == TOGGLE_SENDANDMOUSE)
-		&& !sSendMode && !aTargetWindow && g_os.IsWinNT4orLater();
+		&& !sSendMode && !aTargetWindow;
 	if (do_selective_blockinput)
 		Line::ScriptBlockInput(true); // Turn it on unconditionally even if it was on, since Ctrl-Alt-Del might have disabled it.
 
@@ -720,7 +710,7 @@ void SendKeys(LPTSTR aKeys, SendRawModes aSendRaw, SendModes aSendModeOrig, HWND
 					{
 						// Use SendInput in unicode mode if available, otherwise fall back to SendASC.
 						// To know why the following requires sSendMode != SM_PLAY, see SendUnicodeChar.
-						if (sSendMode != SM_PLAY && g_os.IsWin2000orLater())
+						if (sSendMode != SM_PLAY)
 						{
 							SendUnicodeChar(wc1, mods_for_next_key | persistent_modifiers_for_this_SendKeys);
 							if (wc2)
@@ -833,6 +823,7 @@ brace_case_end: // This label is used to simplify the code without sacrificing p
 			//    they know there are other LL hooks in the system.  In any case, there's no known solution
 			//    for it, so nothing can be done.
 			mods_to_set = persistent_modifiers_for_this_SendKeys
+				| sModifiersLR_remapped // Restore any modifiers which were put in the down state by remappings or {key DownR} prior to this Send.
 				| (sInBlindMode ? 0 : (mods_down_physically_orig & ~mods_down_physically_but_not_logically_orig)); // The last item is usually 0.
 			// Above: When in blind mode, don't restore physical modifiers.  This is done to allow a hotkey
 			// such as the following to release Shift:
@@ -929,7 +920,12 @@ brace_case_end: // This label is used to simplify the code without sacrificing p
 		// there generally shouldn't be any up-events for Alt or Win because SendKey() would have already
 		// released them.  One possible exception to this is when the user physically released Alt or Win
 		// during the send (perhaps only during specific sensitive/vulnerable moments).
-		SetModifierLRState(mods_to_set, GetModifierLRState(), aTargetWindow, true, true); // It also does DoKeyDelay(g->PressDuration).
+		// g_modifiersLR_numpad_mask is used to work around an issue where our changes to shift-key state
+		// trigger the system's shift-numpad handling (usually in combination with actual user input),
+		// which in turn causes the Shift key to stick down.  If non-zero, the Shift key is currently "up"
+		// but should be "released" anyway, since the system will inject Shift-down either before the next
+		// keyboard event or after the Numpad key is released.  Find "fake shift" for more details.
+		SetModifierLRState(mods_to_set, GetModifierLRState() | g_modifiersLR_numpad_mask, aTargetWindow, true, true); // It also does DoKeyDelay(g->PressDuration).
 	} // End of non-array Send.
 
 	// For peace of mind and because that's how it was tested originally, the following is done
@@ -1124,11 +1120,20 @@ void SendKey(vk_type aVK, sc_type aSC, modLR_type aModifiersLR, modLR_type aModi
 		// determination.  This avoids extra keystrokes, while still procrastinating the release of Ctrl/Shift so
 		// that those can be left down if the caller's next keystroke happens to need them.
 		modLR_type state_now = sSendMode ? sEventModifiersLR : GetModifierLRState();
-		modLR_type win_alt_to_be_released = ((state_now ^ aModifiersLRPersistent) & state_now) // The modifiers to be released...
+		modLR_type win_alt_to_be_released = (state_now & ~aModifiersLRPersistent) // The modifiers to be released...
 			& (MOD_LWIN|MOD_RWIN|MOD_LALT|MOD_RALT); // ... but restrict them to only Win/Alt.
 		if (win_alt_to_be_released)
-			SetModifierLRState(state_now & ~win_alt_to_be_released
-				, state_now, aTargetWindow, true, false); // It also does DoKeyDelay(g->PressDuration).
+		{
+			// Originally used the following for mods new/now: state_now & ~win_alt_to_be_released, state_now
+			// When AltGr is to be released, the above formula passes LCtrl+RAlt as the current state and just
+			// LCtrl as the new state, which results in LCtrl being pushed back down after it is released via
+			// AltGr.  Although our caller releases LCtrl if needed, it usually uses KEY_IGNORE, so if we put
+			// LCtrl down here, it would be wrongly stuck down in g_modifiersLR_logical_non_ignored, which
+			// causes ^-modified hotkeys to fire when they shouldn't and prevents non-^ hotkeys from firing.
+			// By ignoring the current modifier state and only specifying the modifiers we want released,
+			// we avoid any chance of sending any unwanted key-down:
+			SetModifierLRState(0, win_alt_to_be_released, aTargetWindow, true, false); // It also does DoKeyDelay(g->PressDuration).
+		}
 	}
 }
 
@@ -1610,29 +1615,16 @@ void KeyEvent(KeyEventTypes aEventType, vk_type aVK, sc_type aSC, HWND aTargetWi
 			// zero like it normally would.  Even though the hook would try to use MapVirtualKey() to
 			// convert zero-value scan codes, it's much better to send it here also for full compatibility
 			// with any apps that may rely on scan code (and such would be the case if the hook isn't
-			// active because the user doesn't need it; also for some games maybe).  In addition, if the
-			// current OS is Win9x, we must map it here manually (above) because otherwise the hook
-			// wouldn't be able to differentiate left/right on keys such as RControl, which is detected
-			// via its scan code.
+			// active because the user doesn't need it; also for some games maybe).
 			aSC = vk_to_sc(aVK);
 
 	BYTE aSC_lobyte = LOBYTE(aSC);
 	DWORD event_flags = HIBYTE(aSC) ? KEYEVENTF_EXTENDEDKEY : 0;
 
-	// Do this only after the above, so that the SC is left/right specific if the VK was such,
-	// even on Win9x (though it's probably never called that way for Win9x; it's probably always
-	// called with either just the proper left/right SC or that plus the neutral VK).
-	// Under WinNT/2k/XP, sending VK_LCONTROL and such result in the high-level (but not low-level
-	// I think) hook receiving VK_CONTROL.  So somewhere internally it's being translated (probably
-	// by keybd_event itself).  In light of this, translate the keys here manually to ensure full
-	// support under Win9x (which might not support this internal translation).  The scan code
-	// looked up above should still be correct for left-right centric keys even under Win9x.
-	// v1.0.43: Apparently, the journal playback hook also requires neutral modifier keystrokes
+	// v1.0.43: Apparently, the journal playback hook requires neutral modifier keystrokes
 	// rather than left/right ones.  Otherwise, the Shift key can't capitalize letters, etc.
-	if (sSendMode == SM_PLAY || g_os.IsWin9x())
+	if (sSendMode == SM_PLAY)
 	{
-		// Convert any non-neutral VK's to neutral for these OSes, since apps and the OS itself
-		// can't be expected to support left/right specific VKs while running under Win9x:
 		switch(aVK)
 		{
 		case VK_LCONTROL:
@@ -1733,19 +1725,16 @@ void KeyEvent(KeyEventTypes aEventType, vk_type aVK, sc_type aSC, HWND aTargetWi
 		// Users of the below want them updated only for keybd_event() keystrokes (not PostMessage ones):
 		sPrevEventType = aEventType;
 		sPrevVK = aVK;
-		// Turn off BlockInput momentarily to support sending of the ALT key.  This is not done for
-		// Win9x because input cannot be simulated during BlockInput on that platform anyway; thus
-		// it seems best (due to backward compatibility) not to turn off BlockInput then.
+		// Turn off BlockInput momentarily to support sending of the ALT key.
 		// Jon Bennett noted: "As many of you are aware BlockInput was "broken" by a SP1 hotfix under
 		// Windows XP so that the ALT key could not be sent. I just tried it under XP SP2 and it seems
 		// to work again."  In light of this, it seems best to unconditionally and momentarily disable
-		// input blocking regardless of which OS is being used (except Win9x, since no simulated input
-		// is even possible for those OSes).
+		// input blocking regardless of which OS is being used.
 		// For thread safety, allow block-input modification only by the main thread.  This should avoid
 		// any chance that block-input will get stuck on due to two threads simultaneously reading+changing
 		// g_BlockInput (changes occur via calls to ScriptBlockInput).
 		bool we_turned_blockinput_off = g_BlockInput && (aVK == VK_MENU || aVK == VK_LMENU || aVK == VK_RMENU)
-			&& !caller_is_keybd_hook && g_os.IsWinNT4orLater(); // Ordered for short-circuit performance.
+			&& !caller_is_keybd_hook; // Ordered for short-circuit performance.
 		if (we_turned_blockinput_off)
 			Line::ScriptBlockInput(false);
 
@@ -1753,7 +1742,7 @@ void KeyEvent(KeyEventTypes aEventType, vk_type aVK, sc_type aSC, HWND aTargetWi
 		HKL target_keybd_layout; //
 		ResultType r_mem, &target_layout_has_altgr = caller_is_keybd_hook ? r_mem : sTargetLayoutHasAltGr; // Same as above.
 		bool hookable_ralt, lcontrol_was_down, do_detect_altgr;
-		if (do_detect_altgr = hookable_ralt = (aVK == VK_RMENU && !put_event_into_array && g_KeybdHook)) // This is an RALT that the hook will be able to monitor. Using VK_RMENU vs. VK_MENU should be safe since this logic is only needed for the hook, which is never in effect on Win9x.
+		if (do_detect_altgr = hookable_ralt = (aVK == VK_RMENU && !put_event_into_array && g_KeybdHook)) // This is an RALT that the hook will be able to monitor.
 		{
 			if (!caller_is_keybd_hook) // sTargetKeybdLayout is set/valid only by SendKeys().
 				target_keybd_layout = sTargetKeybdLayout;
@@ -1766,7 +1755,7 @@ void KeyEvent(KeyEventTypes aEventType, vk_type aVK, sc_type aSC, HWND aTargetWi
 				do_detect_altgr = false; // So don't go through the detection steps here and other places later below.
 			else
 			{
-				control_vk = g_os.IsWin2000orLater() ? VK_LCONTROL : VK_CONTROL;
+				control_vk = VK_LCONTROL;
 				lcontrol_was_down = IsKeyDownAsync(control_vk);
 				// Add extra detection of AltGr if hook is installed, which has been show to be useful for some
 				// scripts where the other AltGr detection methods don't occur in a timely enough fashion.
@@ -1840,11 +1829,6 @@ void KeyEvent(KeyEventTypes aEventType, vk_type aVK, sc_type aSC, HWND aTargetWi
 						// Above also updates sTargetLayoutHasAltGr in cases where target_layout_has_altgr is an alias/reference for it.
 				}
 			}
-
-#ifdef CONFIG_WIN9X
-			if (aVK == VK_NUMLOCK && g_os.IsWin9x()) // Under Win9x, Numlock needs special treatment.
-				ToggleNumlockWin9x();
-#endif
 
 			if (do_key_history)
 				UpdateKeyEventHistory(false, aVK, aSC); // Should be thread-safe since if no hook means only one thread ever sends keystrokes (with possible exception of mouse hook, but that seems too rare).
@@ -2064,7 +2048,7 @@ void PerformMouseCommon(ActionTypeType aActionType, vk_type aVK, int aX1, int aY
 	sSendMode = g->SendMode;
 	if (sSendMode == SM_INPUT || sSendMode == SM_INPUT_FALLBACK_TO_PLAY)
 	{
-		if (!sMySendInput || SystemHasAnotherMouseHook()) // See similar section in SendKeys() for details.
+		if (SystemHasAnotherMouseHook()) // See similar section in SendKeys() for details.
 			sSendMode = (sSendMode == SM_INPUT) ? SM_EVENT : SM_PLAY;
 		else
 			sSendMode = SM_INPUT; // Resolve early so that other sections don't have to consider SM_INPUT_FALLBACK_TO_PLAY a valid value.
@@ -2076,7 +2060,7 @@ void PerformMouseCommon(ActionTypeType aActionType, vk_type aVK, int aX1, int aY
 	// Turn it back off only if it wasn't ON before we started.
 	bool blockinput_prev = g_BlockInput;
 	bool do_selective_blockinput = (g_BlockInputMode == TOGGLE_MOUSE || g_BlockInputMode == TOGGLE_SENDANDMOUSE)
-		&& !sSendMode && g_os.IsWinNT4orLater();
+		&& !sSendMode;
 	if (do_selective_blockinput) // It seems best NOT to use g_BlockMouseMove for this, since often times the user would want keyboard input to be disabled too, until after the mouse event is done.
 		Line::ScriptBlockInput(true); // Turn it on unconditionally even if it was on, since Ctrl-Alt-Del might have disabled it.
 
@@ -2796,7 +2780,6 @@ void InitEventArray(void *aMem, UINT aMaxEvents, modLR_type aModifiersLR)
 
 
 void SendEventArray(int &aFinalKeyDelay, modLR_type aModsDuringSend)
-// Caller must avoid calling this function if sMySendInput is NULL.
 // aFinalKeyDelay (which the caller should have initialized to -1 prior to calling) may be changed here
 // to the desired/final delay.  Caller must not act upon it until changing sTypeOfHookToBuild to something
 // that will allow DoKeyDelay() to do a real delay.
@@ -2820,8 +2803,7 @@ void SendEventArray(int &aFinalKeyDelay, modLR_type aModsDuringSend)
 		if (active_hooks = GetActiveHooks())
 			AddRemoveHooks(active_hooks & ~sHooksToRemoveDuringSendInput, true);
 
-		// Caller has ensured that sMySendInput isn't NULL.
-		sMySendInput(sEventCount, sEventSI, sizeof(INPUT)); // Must call dynamically-resolved version for Win95/NT compatibility.
+		SendInput(sEventCount, sEventSI, sizeof(INPUT)); // Must call dynamically-resolved version for Win95/NT compatibility.
 		// The return value is ignored because it never seems to be anything other than sEventCount, even if
 		// the Send seems to partially fail (e.g. due to hitting 5000 event maximum).
 		// Typical speed of SendInput: 10ms or less for short sends (under 100 events).
@@ -2969,13 +2951,6 @@ void DoKeyDelay(int aDelay)
 		//else for other types of arrays, never insert a delay or do one now.
 		return;
 	}
-	if (g_os.IsWin9x())
-	{
-		// Do a true sleep on Win9x because the MsgSleep() method is very inaccurate on Win9x
-		// for some reason (a MsgSleep(1) causes a sleep between 10 and 55ms, for example):
-		Sleep(aDelay);
-		return;
-	}
 	SLEEP_WITHOUT_INTERRUPTION(aDelay);
 }
 
@@ -2996,22 +2971,13 @@ void DoMouseDelay() // Helper function for the mouse functions below.
 	}
 	// I believe the varying sleep methods below were put in place to avoid issues when simulating
 	// clicks on the script's own windows.  There are extensive comments in MouseClick() and the
-	// hook about these issues.  Also, Sleep() is more accurate on Win9x than MsgSleep, which is
-	// why it's used in that case.  Here are more details from an older comment:
+	// hook about these issues.  Here are more details from an older comment:
 	// Always sleep a certain minimum amount of time between events to improve reliability,
-	// but allow the user to specify a higher time if desired.  Note that for Win9x,
-	// a true Sleep() is done because it is much more accurate than the MsgSleep() method,
-	// at least on Win98SE when short sleeps are done.  UPDATE: A true sleep is now done
-	// unconditionally if the delay period is small.  This fixes a small issue where if
-	// LButton is a hotkey that includes "MouseClick left" somewhere in its subroutine,
-	// the script's own main window's title bar buttons for min/max/close would not
-	// properly respond to left-clicks.  By contrast, the following is no longer an issue
-	// due to the dedicated thread in v1.0.39 (or more likely, due to an older change that
-	// causes the tray menu to open upon RButton-up rather than down):
-	// RButton is a hotkey that includes "MouseClick right" somewhere in its subroutine,
-	// the user would not be able to correctly open the script's own tray menu via
-	// right-click (note that this issue affected only the one script itself, not others).
-	if (mouse_delay < 11 || (mouse_delay < 25 && g_os.IsWin9x()))
+	// but allow the user to specify a higher time if desired.  A true sleep is done if the
+	// delay period is small.  This fixes a small issue where if LButton is a hotkey that
+	// includes "MouseClick left" somewhere in its subroutine, the script's own main window's
+	// title bar buttons for min/max/close would not properly respond to left-clicks.
+	if (mouse_delay < 11)
 		Sleep(mouse_delay);
 	else
 		SLEEP_WITHOUT_INTERRUPTION(mouse_delay)
@@ -3050,7 +3016,7 @@ void UpdateKeyEventHistory(bool aKeyUp, vk_type aVK, sc_type aSC)
 ToggleValueType ToggleKeyState(vk_type aVK, ToggleValueType aToggleValue)
 // Toggle the given aVK into another state.  For performance, it is the caller's responsibility to
 // ensure that aVK is a toggleable key such as capslock, numlock, insert, or scrolllock.
-// Returns the state the key was in before it was changed (but it's only a best-guess under Win9x).
+// Returns the state the key was in before it was changed.
 {
 	// Can't use IsKeyDownAsync/GetAsyncKeyState() because it doesn't have this info:
 	ToggleValueType starting_state = IsKeyToggledOn(aVK) ? TOGGLED_ON : TOGGLED_OFF;
@@ -3060,19 +3026,6 @@ ToggleValueType ToggleKeyState(vk_type aVK, ToggleValueType aToggleValue)
 		return starting_state;
 	//if (aVK == VK_NUMLOCK) // v1.1.22.05: This also applies to CapsLock and ScrollLock.
 	{
-#ifdef CONFIG_WIN9X
-		if (g_os.IsWin9x() && aVK == VK_NUMLOCK)
-		{
-			// For Win9x, we want to set the state unconditionally to be sure it's right.  This is because
-			// the retrieval of the Capslock state, for example, is unreliable, at least under Win98se
-			// (probably due to lack of an AttachThreadInput() having been done).  Although the
-			// SetKeyboardState() method used by ToggleNumlockWin9x is not required for caps & scroll lock keys,
-			// it is required for Numlock:
-			ToggleNumlockWin9x();
-			return starting_state;  // Best guess, but might be wrong.
-		}
-#endif
-		// Otherwise, NT/2k/XP:
 		// If the key is being held down, sending a KEYDOWNANDUP won't change its toggle
 		// state unless the key is "released" first.  This has been confirmed for NumLock,
 		// CapsLock and ScrollLock on Windows 2000 (in a VM) and Windows 10.
@@ -3089,7 +3042,7 @@ ToggleValueType ToggleKeyState(vk_type aVK, ToggleValueType aToggleValue)
 		// true state doesn't change either).  This problem tends to happen when the key
 		// is pressed while the hook is forcing it to be either ON or OFF (or it suppresses
 		// it because it's a hotkey).  Needs more testing on diff. keyboards & OSes:
-		if (IsKeyDown2kXP(aVK))
+		if (IsKeyDown(aVK))
 			KeyEvent(KEYUP, aVK);
 	}
 	// Since it's not already in the desired state, toggle it:
@@ -3114,32 +3067,8 @@ ToggleValueType ToggleKeyState(vk_type aVK, ToggleValueType aToggleValue)
 }
 
 
-#ifdef CONFIG_WIN9X
-
-void ToggleNumlockWin9x()
-// Numlock requires a special method to toggle the state and its indicator light under Win9x.
-// Capslock and Scrolllock do not need this method, since keybd_event() works for them.
-{
-	BYTE state[256];
-	GetKeyboardState((PBYTE)&state);
-	state[VK_NUMLOCK] ^= 0x01;  // Toggle the low-order bit to the opposite state.
-	SetKeyboardState((PBYTE)&state);
-}
-
-//void CapslockOffWin9x()
-//{
-//	BYTE state[256];
-//	GetKeyboardState((PBYTE)&state);
-//	state[VK_CAPITAL] &= ~0x01;
-//	SetKeyboardState((PBYTE)&state);
-//}
-
-#endif
-
-
 /*
 void SetKeyState (vk_type vk, int aKeyUp)
-// Later need to adapt this to support Win9x by using SetKeyboardState for those OSs.
 {
 	if (!vk) return;
 	int key_already_up = !(GetKeyState(vk) & 0x8000);
@@ -3390,8 +3319,21 @@ void SetModifierLRState(modLR_type aModifiersLRnew, modLR_type aModifiersLRnow, 
 			// This would cause LControl to get stuck down for hotkeys in German layout such as:
 			//   <^>!a::SendRaw, {
 			//   <^>!m::Send ^c
-			if (sTargetLayoutHasAltGr == CONDITION_TRUE && (aModifiersLRnow & MOD_LCONTROL))
-				KeyEvent(KEYUP, VK_LCONTROL, 0, NULL, false, aExtraInfo);
+			if (sTargetLayoutHasAltGr == CONDITION_TRUE)
+			{
+				if (aModifiersLRnow & MOD_LCONTROL)
+					KeyEvent(KEYUP, VK_LCONTROL, 0, NULL, false, aExtraInfo);
+				if (aModifiersLRnow & MOD_RCONTROL)
+				{
+					// Release RCtrl before pressing AltGr, because otherwise the system will not put
+					// LCtrl into effect, but it will still inject LCtrl-up when AltGr is released.
+					// With LCtrl not in effect and RCtrl being released below, AltGr would instead
+					// act as pure RAlt, which would not have the right effect.
+					// RCtrl will be put back into effect below if aModifiersLRnew & MOD_RCONTROL.
+					KeyEvent(KEYUP, VK_RCONTROL, 0, NULL, false, aExtraInfo);
+					aModifiersLRnow &= ~MOD_RCONTROL;
+				}
+			}
 			KeyEvent(KEYDOWN, VK_RMENU, 0, NULL, false, aExtraInfo);
 			if (sTargetLayoutHasAltGr == CONDITION_TRUE) // Note that KeyEvent() might have just changed the value of sTargetLayoutHasAltGr.
 			{
@@ -3606,28 +3548,14 @@ modLR_type GetModifierLRState(bool aExplicitlyGet)
 	// in its place, yields the correct info.  Very strange.
 
 	modLR_type modifiersLR = 0;  // Allows all to default to up/off to simplify the below.
-	if (g_os.IsWin9x() || g_os.IsWinNT4())
-	{
-		// Assume it's the left key since there's no way to tell which of the pair it
-		// is? (unless the hook is installed, in which case it's value would have already
-		// been returned, above).
-		if (IsKeyDown9xNT(VK_SHIFT))   modifiersLR |= MOD_LSHIFT;
-		if (IsKeyDown9xNT(VK_CONTROL)) modifiersLR |= MOD_LCONTROL;
-		if (IsKeyDown9xNT(VK_MENU))    modifiersLR |= MOD_LALT;
-		if (IsKeyDown9xNT(VK_LWIN))    modifiersLR |= MOD_LWIN;
-		if (IsKeyDown9xNT(VK_RWIN))    modifiersLR |= MOD_RWIN;
-	}
-	else
-	{
-		if (IsKeyDownAsync(VK_LSHIFT))   modifiersLR |= MOD_LSHIFT;
-		if (IsKeyDownAsync(VK_RSHIFT))   modifiersLR |= MOD_RSHIFT;
-		if (IsKeyDownAsync(VK_LCONTROL)) modifiersLR |= MOD_LCONTROL;
-		if (IsKeyDownAsync(VK_RCONTROL)) modifiersLR |= MOD_RCONTROL;
-		if (IsKeyDownAsync(VK_LMENU))    modifiersLR |= MOD_LALT;
-		if (IsKeyDownAsync(VK_RMENU))    modifiersLR |= MOD_RALT;
-		if (IsKeyDownAsync(VK_LWIN))     modifiersLR |= MOD_LWIN;
-		if (IsKeyDownAsync(VK_RWIN))     modifiersLR |= MOD_RWIN;
-	}
+	if (IsKeyDownAsync(VK_LSHIFT))   modifiersLR |= MOD_LSHIFT;
+	if (IsKeyDownAsync(VK_RSHIFT))   modifiersLR |= MOD_RSHIFT;
+	if (IsKeyDownAsync(VK_LCONTROL)) modifiersLR |= MOD_LCONTROL;
+	if (IsKeyDownAsync(VK_RCONTROL)) modifiersLR |= MOD_RCONTROL;
+	if (IsKeyDownAsync(VK_LMENU))    modifiersLR |= MOD_LALT;
+	if (IsKeyDownAsync(VK_RMENU))    modifiersLR |= MOD_RALT;
+	if (IsKeyDownAsync(VK_LWIN))     modifiersLR |= MOD_LWIN;
+	if (IsKeyDownAsync(VK_RWIN))     modifiersLR |= MOD_RWIN;
 
 	// Thread-safe: The following section isn't thread-safe because either the hook thread
 	// or the main thread can be calling it.  However, given that anything dealing with
@@ -3651,6 +3579,10 @@ modLR_type GetModifierLRState(bool aExplicitlyGet)
 		// UPDATE: The following adjustment is now also relied upon by the SendInput method
 		// to correct physical modifier state during periods when the hook was temporarily removed
 		// to allow a SendInput to be uninterruptible.
+		// UPDATE: The modifier state might also become incorrect due to keyboard events which
+		// are missed due to User Interface Privelege Isolation; i.e. because a window belonging
+		// to a process with higher integrity level than our own became active while the key was
+		// down, so we saw the down event but not the up event.
 		modLR_type modifiers_wrongly_down = g_modifiersLR_logical & ~modifiersLR;
 		if (modifiers_wrongly_down)
 		{
@@ -3663,6 +3595,9 @@ modLR_type GetModifierLRState(bool aExplicitlyGet)
 			g_modifiersLR_logical_non_ignored &= ~modifiers_wrongly_down;
 			// Also adjust physical state so that the GetKeyState command will retrieve the correct values:
 			AdjustKeyState(g_PhysicalKeyState, g_modifiersLR_physical);
+			// Also reset pPrefixKey if it is one of the wrongly-down modifiers.
+			if (pPrefixKey && (pPrefixKey->as_modifiersLR & modifiers_wrongly_down))
+				pPrefixKey = NULL;
 		}
 	}
 
@@ -3900,23 +3835,47 @@ ResultType LayoutHasAltGrDirect(HKL aLayout)
 // This is fast enough that there's no need to cache these values on startup.
 {
 	// This abbreviated definition is based on the actual definition in kbd.h (Windows DDK):
-	typedef struct tagKbdLayer {
-		PVOID pCharModifiers;
-		PVOID pVkToWcharTable;
-		PVOID pDeadKey;
-		PVOID pKeyNames;
-		PVOID pKeyNamesExt;
-		WCHAR **pKeyNamesDead;
-		USHORT  *pusVSCtoVK;
-		BYTE    bMaxVSCtoVK;
-		PVOID   pVSCtoVK_E0;
-		PVOID   pVSCtoVK_E1;
+	// Updated to use two separate struct definitions, since the pointers are qualified with
+	// KBD_LONG_POINTER, which is 64-bit when building for Wow64 (32-bit dll on 64-bit system).
+	typedef UINT64 KLP64;
+	typedef UINT KLP32;
+
+	// Struct used on 64-bit systems (by both 32-bit and 64-bit programs):
+	struct KBDTABLES64 {
+		KLP64 pCharModifiers;
+		KLP64 pVkToWcharTable;
+		KLP64 pDeadKey;
+		KLP64 pKeyNames;
+		KLP64 pKeyNamesExt;
+		KLP64 pKeyNamesDead;
+		KLP64 pusVSCtoVK;
+		BYTE  bMaxVSCtoVK;
+		KLP64 pVSCtoVK_E0;
+		KLP64 pVSCtoVK_E1;
 		// This is the one we want:
 		DWORD fLocaleFlags;
 		// Struct definition truncated.
-	} KBDTABLES, *PKBDTABLES;
+	};
+
+	// Struct used on 32-bit systems:
+	struct KBDTABLES32 {
+		KLP32 pCharModifiers;
+		KLP32 pVkToWcharTable;
+		KLP32 pDeadKey;
+		KLP32 pKeyNames;
+		KLP32 pKeyNamesExt;
+		KLP32 pKeyNamesDead;
+		KLP32 pusVSCtoVK;
+		BYTE  bMaxVSCtoVK;
+		KLP32 pVSCtoVK_E0;
+		KLP32 pVSCtoVK_E1;
+		// This is the one we want:
+		DWORD fLocaleFlags;
+		// Struct definition truncated.
+	};
+	
 	#define KLLF_ALTGR 0x0001 // Also defined in kbd.h.
-	typedef PKBDTABLES (* KbdLayerDescriptorType)();
+	typedef PVOID (* KbdLayerDescriptorType)();
 
 	ResultType result = LAYOUT_UNDETERMINED;
 
@@ -3925,8 +3884,9 @@ ResultType LayoutHasAltGrDirect(HKL aLayout)
 		KbdLayerDescriptorType kbdLayerDescriptor = (KbdLayerDescriptorType)GetProcAddress(hmod, "KbdLayerDescriptor");
 		if (kbdLayerDescriptor)
 		{
-			PKBDTABLES kl = kbdLayerDescriptor();
-			result = (kl->fLocaleFlags & KLLF_ALTGR) ? CONDITION_TRUE : CONDITION_FALSE;
+			PVOID kl = kbdLayerDescriptor();
+			DWORD flags = IsOS64Bit() ? ((KBDTABLES64 *)kl)->fLocaleFlags : ((KBDTABLES32 *)kl)->fLocaleFlags;
+			result = (flags & KLLF_ALTGR) ? CONDITION_TRUE : CONDITION_FALSE;
 		}
 		FreeLibrary(hmod);
 	}
@@ -4196,15 +4156,7 @@ vk_type CharToVKAndModifiers(TCHAR aChar, modLR_type *pModifiersLR, HKL aKeybdLa
 	// which ALT key is held down to produce the character.  The following section detects AltGr by the
 	// assuming that any character that requires both CTRL and ALT (with optional SHIFT) to be held
 	// down is in fact an AltGr key (I don't think there are any that aren't AltGr in this case, but
-	// confirmation would be nice).  Also, this is not done for Win9x because the distinction between
-	// right and left-alt is not well-supported and it might do more harm than good (testing is
-	// needed on fussy apps like Putty on Win9x).  UPDATE: Windows NT4 is now excluded from this
-	// change because apparently it wants the left Alt key's virtual key and not the right's (though
-	// perhaps it would prefer the right scan code vs. the left in apps such as Putty, but until that
-	// is proven, the complexity is not added here).  Otherwise, on French and other layouts on NT4,
-	// AltGr-produced characters such as backslash do not get sent properly.  In hindsight, this is
-	// not surprising because the keyboard hook also receives neutral modifier keys on NT4 rather than
-	// a more specific left/right key.
+	// confirmation would be nice).
 
 	// The win docs for VkKeyScan() are a bit confusing, referring to flag "bits" when it should really
 	// say flag "values".  In addition, it seems that these flag values are incompatible with
@@ -4214,7 +4166,7 @@ vk_type CharToVKAndModifiers(TCHAR aChar, modLR_type *pModifiersLR, HKL aKeybdLa
 		// Best not to reset this value because some callers want to retain what was in it before,
 		// merely merging these new values into it:
 		//*pModifiers = 0;
-		if ((keyscan_modifiers & 0x06) == 0x06 && g_os.IsWin2000orLater()) // 0x06 means "requires/includes AltGr".
+		if ((keyscan_modifiers & 0x06) == 0x06) // 0x06 means "requires/includes AltGr".
 		{
 			// v1.0.35: The critical difference below is right vs. left ALT.  Must not include MOD_LCONTROL
 			// because simulating the RAlt keystroke on these keyboard layouts will automatically
@@ -4484,24 +4436,31 @@ sc_type vk_to_sc(vk_type aVK, bool aReturnSecondary)
 
 	sc_type sc = 0;
 
+	// Yield a manual translation for virtual keys that MapVirtualKey() doesn't support or for which it
+	// doesn't yield consistent result.
 	switch (aVK)
 	{
-	// Yield a manually translation for virtual keys that MapVirtualKey() doesn't support or for which it
-	// doesn't yield consistent result (such as Win9x supporting only SHIFT rather than VK_LSHIFT/VK_RSHIFT).
+	// Win9x is probably the main reason the modifier keys were handled this way -- testing indicates
+	// that MapVirtualKey() returns the correct result even on Win2k.  However, since Alt & Ctrl are
+	// distinguished by the extended key flag which MapVirtualKey() doesn't include, they would need
+	// to be at least partially handled here anyway.
 	case VK_LSHIFT:   sc = SC_LSHIFT; break; // Modifiers are listed first for performance.
 	case VK_RSHIFT:   sc = SC_RSHIFT; break;
 	case VK_LCONTROL: sc = SC_LCONTROL; break;
 	case VK_RCONTROL: sc = SC_RCONTROL; break;
 	case VK_LMENU:    sc = SC_LALT; break;
 	case VK_RMENU:    sc = SC_RALT; break;
-	case VK_LWIN:     sc = SC_LWIN; break; // Earliest versions of Win95/NT might not support these, so map them manually.
-	case VK_RWIN:     sc = SC_RWIN; break; //
+	case VK_LWIN:     sc = SC_LWIN; break;
+	case VK_RWIN:     sc = SC_RWIN; break;
+
 	case VK_PAUSE:    sc = SC_PAUSE; break; // Added in v1.1.26.01.
 
-	// According to http://support.microsoft.com/default.aspx?scid=kb;en-us;72583
+	// According to http://support.microsoft.com/default.aspx?scid=kb;en-us;72583 (broken link)
 	// most or all numeric keypad keys cannot be mapped reliably under any OS. The article is
 	// a little unclear about which direction, if any, that MapVirtualKey() does work in for
 	// the numpad keys, so for peace-of-mind map them all manually for now:
+	// UPDATE: MapVirtualKey() passes testing on 2k and 10, except for the extended keys
+	// (NumpadDiv and Numlock).
 	case VK_NUMPAD0:  sc = SC_NUMPAD0; break;
 	case VK_NUMPAD1:  sc = SC_NUMPAD1; break;
 	case VK_NUMPAD2:  sc = SC_NUMPAD2; break;
@@ -4518,7 +4477,7 @@ sc_type vk_to_sc(vk_type aVK, bool aReturnSecondary)
 	case VK_MULTIPLY: sc = SC_NUMPADMULT; break;
 	case VK_SUBTRACT: sc = SC_NUMPADSUB; break;
 	case VK_ADD:      sc = SC_NUMPADADD; break;
-	
+
 	// Added in v1.1.26.02 because MapVirtualKey returns the scan code for SysReq
 	// (which is what the key produces while Alt is held down):
 	case VK_SNAPSHOT: sc = SC_PRINTSCREEN; break;
@@ -4605,9 +4564,11 @@ vk_type sc_to_vk(sc_type aSC)
 	// determine which keys should be handled by scan code rather than vk:
 	switch (aSC)
 	{
-	// Even though neither of the SHIFT keys are extended -- and thus could be mapped with MapVirtualKey()
-	// -- it seems better to define them explicitly because under Win9x (maybe just Win95).
-	// I'm pretty sure MapVirtualKey() would return VK_SHIFT instead of the left/right VK.
+	// Some of the modifiers can be mapped with MapVirtualKey(), but the behaviour is not
+	// consistent for all modifiers across all OSes, so it seems best to handle them all here.
+	// For instance, LShift, LCtrl and LAlt can be mapped with MAPVK_VSC_TO_VK_EX, but RCtrl
+	// and RAlt must have 0x100 translated to 0xE000, which requires at least Windows Vista,
+	// while RShift only works as 0x36, not 0xE036, despite being an extended key.
 	case SC_LSHIFT:      return VK_LSHIFT; // Modifiers are listed first for performance.
 	case SC_RSHIFT:      return VK_RSHIFT;
 	case SC_LCONTROL:    return VK_LCONTROL;
@@ -4615,24 +4576,27 @@ vk_type sc_to_vk(sc_type aSC)
 	case SC_LALT:        return VK_LMENU;
 	case SC_RALT:        return VK_RMENU;
 
-	// It seems worthwhile including these even though the extended-key check below will
-	// handle them if the OS is Vista or later.  Truncating aSC (as would be done below
-	// on Win2k/XP) would give the wrong results.
+	// These require explicit mapping on 2k/XP since (aSC & 0xFF) produces the wrong VK,
+	// but would work on Vista and later with 0x100 translated to 0xE000:
 	case SC_LWIN:        return VK_LWIN;
 	case SC_RWIN:        return VK_RWIN;
 
-	// Numpad keys require explicit mapping because MapVirtualKey() doesn't support them on all OSes.
-	// See comments in vk_to_sc() for details.
-	case SC_NUMLOCK:     return VK_NUMLOCK;
-	case SC_NUMPADDIV:   return VK_DIVIDE;
-	case SC_NUMPADMULT:  return VK_MULTIPLY;
-	case SC_NUMPADSUB:   return VK_SUBTRACT;
-	case SC_NUMPADADD:   return VK_ADD;
-	case SC_NUMPADENTER: return VK_RETURN;
+	case SC_NUMLOCK:     return VK_NUMLOCK; // Requires explicit mapping even on Windows 10.
+	case SC_NUMPADDIV:   return VK_DIVIDE; // Requires explicit mapping on 2k/XP (see above).
 
-	// The following are ambiguous because each maps to more than one VK.  But be careful
+	// These are handled correctly by MapVirtualKey(), but are kept here to ensure consistency
+	// with the other Numpad keys (such as with unconventional custom keyboard layouts, in theory):
+	case SC_NUMPADENTER: return VK_RETURN; // Same VK as SC_ENTER, which is handled by MapVirtualKey().
+	case SC_NUMPADMULT:  return VK_MULTIPLY; // Only this key has this SC.
+	case SC_NUMPADSUB:   return VK_SUBTRACT; //
+	case SC_NUMPADADD:   return VK_ADD;      //
+
+	// The following are ambiguous because the mapping depends on Numlock.  But be careful
 	// changing the value to the other choice because some callers rely upon the values
-	// assigned below to determine which keys should be handled by scan code rather than vk:
+	// assigned below to determine which keys should be handled by scan code rather than vk.
+	// For that reason, this is done manually even though testing indicates that both of the
+	// MapVirtualKey() calls below would produce this same result (which is what happens for
+	// extended keys such as SC_DELETE).
 	case SC_NUMPADDEL:   return VK_DELETE;
 	case SC_NUMPADCLEAR: return VK_CLEAR;
 	case SC_NUMPADINS:   return VK_INSERT;
@@ -4682,12 +4646,7 @@ vk_type sc_to_vk(sc_type aSC)
 	// resolve even elements such as SC_INSERT, which is an extended scan code, because
 	// it passes in only the low-order byte which is SC_NUMPADINS.  In the case of SC_INSERT
 	// and similar ones, MapVirtualKey() will return the same vk for both, which is correct.
-	// Only pass the LOBYTE because it fails to work properly otherwise.
-	// Also, DO NOT pass 3 for the 2nd param of MapVirtualKey() because apparently
-	// that is not compatible with Win9x so it winds up returning zero for keys
-	// such as UP, LEFT, HOME, and PGUP (maybe other sorts of keys too).  This
-	// should be okay even on XP because the left/right specific keys have already
-	// been resolved above so don't need to be looked up here (LWIN and RWIN
-	// each have their own VK's so shouldn't be problem for the below call to resolve):
+	// Only pass the LOBYTE because even if the OS supports an extended scan code, aSC uses
+	// our non-standard 0x100 rather than the standard 0xE000 (see above).
 	return MapVirtualKey((BYTE)aSC, MAPVK_VSC_TO_VK);
 }

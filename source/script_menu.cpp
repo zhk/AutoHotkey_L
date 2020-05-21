@@ -113,8 +113,8 @@ ResultType Script::PerformMenu(LPTSTR aMenu, LPTSTR aCommand, LPTSTR aParam3, LP
 					// destroying it later.
 					mCustomIcon = NULL;  // To indicate that there is no custom icon.
 					mCustomIconSmall = NULL;
-					if (mCustomIconFile)
-						*mCustomIconFile = '\0';
+					free(mCustomIconFile);
+					mCustomIconFile = NULL;
 					mCustomIconNumber = 0;
 					UpdateTrayIcon(true);  // Need to use true in this case too.
 				}
@@ -173,24 +173,18 @@ ResultType Script::PerformMenu(LPTSTR aMenu, LPTSTR aCommand, LPTSTR aParam3, LP
 				mCustomIcon = new_icon;
 				mCustomIconSmall = new_icon_small;
 				mCustomIconNumber = icon_number;
-				// Allocate the full MAX_PATH in case the contents grow longer later.
-				// SimpleHeap improves avg. case mem load:
-				if (!mCustomIconFile)
-					mCustomIconFile = (LPTSTR) SimpleHeap::Malloc(MAX_PATH * sizeof(TCHAR));
-				if (mCustomIconFile)
-				{
-					TCHAR full_path[MAX_PATH], *filename_marker;
-					// If the icon was loaded from a DLL, relative->absolute conversion below may produce the
-					// wrong result (i.e. in the typical case where the DLL is not in the working directory).
-					// So in that case, get the path of the module which contained the icon (if available).
-					// Get the full path in case it's a relative path.  This is documented and it's done in case
-					// the script ever changes its working directory:
-					if (   icon_module && GetModuleFileName(icon_module, full_path, _countof(full_path))
-						|| GetFullPathName(aParam3, _countof(full_path) - 1, full_path, &filename_marker)   )
-						tcslcpy(mCustomIconFile, full_path, MAX_PATH);
-					else
-						tcslcpy(mCustomIconFile, aParam3, MAX_PATH);
-				}
+
+				TCHAR full_path[T_MAX_PATH], *filename_marker;
+				// If the icon was loaded from a DLL, relative->absolute conversion below may produce the
+				// wrong result (i.e. in the typical case where the DLL is not in the working directory).
+				// So in that case, get the path of the module which contained the icon (if available).
+				// Get the full path in case it's a relative path.  This is documented and it's done in case
+				// the script ever changes its working directory:
+				if (   icon_module && GetModuleFileName(icon_module, full_path, _countof(full_path))
+					|| GetFullPathName(aParam3, _countof(full_path) - 1, full_path, &filename_marker)   )
+					aParam3 = full_path;
+				free(mCustomIconFile);
+				mCustomIconFile = _tcsdup(aParam3); // Failure isn't checked due to rarity and for simplicity; it'll be reported as empty in that case.
 
 				if (icon_module)
 					FreeLibrary(icon_module);
@@ -1003,10 +997,6 @@ ResultType UserMenu::RenameItem(UserMenuItem *aMenuItem, LPTSTR aNewName)
 
 	if (*aNewName)
 	{
-		// Names must be unique only within each menu:
-		for (UserMenuItem *mi = mFirstMenuItem; mi; mi = mi->mNextMenuItem)
-			if (!lstrcmpi(mi->mName, aNewName)) // Match found (case insensitive).
-				return FAIL; // Caller should display an error message.
 		if (aMenuItem->mMenuType & MFT_SEPARATOR)
 		{
 			// Since this item is currently a separator, the system will have disabled it.
@@ -1276,8 +1266,6 @@ void UserMenu::SetColor(LPTSTR aColorName, bool aApplyToSubmenus)
 {
 	// Avoid the overhead of creating HBRUSH's on OSes that don't support SetMenuInfo().
 	// Perhaps there is some other way to change menu background color on Win95/NT?
-	if (g_os.IsWin95() || g_os.IsWinNT4())
-		return;
 	AssignColor(aColorName, mColor, mBrush);  // Takes care of deleting old brush, etc.
 	// To avoid complications, such as a submenu being detached from its parent and then its parent
 	// later being deleted (which causes the HBRUSH to get deleted too), give each submenu it's
@@ -1301,16 +1289,11 @@ void UserMenu::ApplyColor(bool aApplyToSubmenus)
 // testing shows that the OS sets the color to white if the HBRUSH becomes invalid.
 // The caller is also responsible for calling UPDATE_GUI_MENU_BARS if desired.
 {
-	// Must fetch function address dynamically or program won't launch at all on Win95/NT:
-	typedef BOOL (WINAPI *MySetMenuInfoType)(HMENU, LPCMENUINFO);
-	static MySetMenuInfoType MySetMenuInfo = (MySetMenuInfoType)GetProcAddress(GetModuleHandle(_T("user32")), "SetMenuInfo");
-	if (!MySetMenuInfo)
-		return;
 	MENUINFO mi = {0}; 
 	mi.cbSize = sizeof(MENUINFO);
 	mi.fMask = MIM_BACKGROUND|(aApplyToSubmenus ? MIM_APPLYTOSUBMENUS : 0);
 	mi.hbrBack = mBrush;
-	MySetMenuInfo(mMenu, &mi);
+	SetMenuInfo(mMenu, &mi);
 }
 
 

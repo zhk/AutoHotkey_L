@@ -32,7 +32,7 @@ GNU General Public License for more details.
 #define SET_TARGET_TO_ALLOWABLE_FOREGROUND(detect_hidden_windows) \
 {\
 	if (target_window = GetForegroundWindow())\
-		if (!(detect_hidden_windows) && !IsWindowVisible(target_window))\
+		if (!(detect_hidden_windows) && (!IsWindowVisible(target_window) || IsWindowCloaked(target_window)))\
 			target_window = NULL;\
 }
 #define IF_USE_FOREGROUND_WINDOW(detect_hidden_windows, title, text, exclude_title, exclude_text)\
@@ -120,7 +120,7 @@ public:
 	DWORD mCandidatePID;
 	TCHAR mCandidateTitle[WINDOW_TEXT_SIZE];  // For storing title or class name of the given mCandidateParent.
 	TCHAR mCandidateClass[WINDOW_CLASS_SIZE]; // Must not share mem with mCandidateTitle because even if ahk_class is in effect, ExcludeTitle can also be in effect.
-	TCHAR mCandidatePath[MAX_PATH];
+	TCHAR mCandidatePath[MAX_PATH]; // MAX_PATH vs. T_MAX_PATH because it currently seems to be impossible to run an executable with a longer path (in Windows 10.0.16299).
 
 
 	void SetCandidate(HWND aWnd) // Must be kept thread-safe since it may be called indirectly by the hook thread.
@@ -263,6 +263,7 @@ BOOL CALLBACK EnumParentFindOwned(HWND aWnd, LPARAM lParam);
 HWND GetNonChildParent(HWND aWnd);
 HWND GetTopChild(HWND aParent);
 bool IsWindowHung(HWND aWnd);
+bool IsWindowCloaked(HWND aWnd);
 
 // Defaults to a low timeout because a window may have hundreds of controls, and if the window
 // is hung, each control might result in a delay of size aTimeout during an EnumWindows.

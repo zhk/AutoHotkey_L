@@ -32,7 +32,7 @@ int WINAPI _tWinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmd
 {
 	// Init any globals not in "struct g" that need it:
 	g_hInstance = hInstance;
-	InitializeCriticalSection(&g_CriticalRegExCache); // v1.0.45.04: Must be done early so that it's unconditional, so that DeleteCriticalSection() in the script destructor can also be unconditional (deleting when never initialized can crash, at least on Win 9x).
+	InitializeCriticalSection(&g_CriticalRegExCache); // v1.0.45.04: Must be done early so that it's unconditional, so that DeleteCriticalSection() in the script destructor can also be unconditional.
 
 	// v1.1.22+: This is done unconditionally, on startup, so that any attempts to read a drive
 	// that has no media (and possibly other errors) won't cause the system to display an error
@@ -43,11 +43,8 @@ int WINAPI _tWinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmd
 	// reverted afterward, so it affected all subsequent commands.
 	SetErrorMode(SEM_FAILCRITICALERRORS);
 
-	if (!GetCurrentDirectory(_countof(g_WorkingDir), g_WorkingDir)) // Needed for the FileSelectFile() workaround.
-		*g_WorkingDir = '\0';
-	// Unlike the below, the above must not be Malloc'd because the contents can later change to something
-	// as large as MAX_PATH by means of the SetWorkingDir command.
-	g_WorkingDirOrig = SimpleHeap::Malloc(g_WorkingDir); // Needed by the Reload command.
+	UpdateWorkingDir(); // Needed for the FileSelectFile() workaround.
+	g_WorkingDirOrig = SimpleHeap::Malloc(const_cast<LPTSTR>(g_WorkingDir.GetString())); // Needed by the Reload command.
 
 	// Set defaults, to be overridden by command line args we receive:
 	bool restart_mode = false;
@@ -297,29 +294,10 @@ int WINAPI _tWinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmd
 	{
 		// Since InitCommonControls() is apparently incapable of initializing DateTime and MonthCal
 		// controls, InitCommonControlsEx() must be called.
-#if defined(CONFIG_WIN9X) || defined(CONFIG_WINNT4)
-		// Since Ex() requires comctl32.dll 4.70+, must get the function's address dynamically
-		// in case the program is running on Windows 95/NT without the updated DLL (otherwise
-		// the program would not launch at all).
-		typedef BOOL (WINAPI *MyInitCommonControlsExType)(LPINITCOMMONCONTROLSEX);
-		MyInitCommonControlsExType MyInitCommonControlsEx = (MyInitCommonControlsExType)
-			GetProcAddress(GetModuleHandle(_T("comctl32")), "InitCommonControlsEx"); // LoadLibrary shouldn't be necessary because comctl32 in linked by compiler.
-		if (MyInitCommonControlsEx)
-		{
-			INITCOMMONCONTROLSEX icce;
-			icce.dwSize = sizeof(INITCOMMONCONTROLSEX);
-			icce.dwICC = ICC_WIN95_CLASSES | ICC_DATE_CLASSES; // ICC_WIN95_CLASSES is equivalent to calling InitCommonControls().
-			MyInitCommonControlsEx(&icce);
-		}
-		else // InitCommonControlsEx not available, so must revert to non-Ex() to make controls work on Win95/NT4.
-			InitCommonControls();
-#else
-		// Currently only needed on Win2k, since Win9x is unsupported.
 		INITCOMMONCONTROLSEX icce;
 		icce.dwSize = sizeof(INITCOMMONCONTROLSEX);
 		icce.dwICC = ICC_WIN95_CLASSES | ICC_DATE_CLASSES; // ICC_WIN95_CLASSES is equivalent to calling InitCommonControls().
 		InitCommonControlsEx(&icce);
-#endif
 	}
 
 #ifdef CONFIG_DEBUGGER
@@ -335,7 +313,7 @@ int WINAPI _tWinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmd
 	// top part is something that's very involved and requires user interaction:
 	Hotkey::ManifestAllHotkeysHotstringsHooks(); // We want these active now in case auto-execute never returns (e.g. loop)
 	g_script.mIsReadyToExecute = true; // This is done only after the above to support error reporting in Hotkey.cpp.
-	g_HSSameLineAction = false; // `#Hotstring E` should not affect Hotstring().
+	g_HSSameLineAction = false; // `#Hotstring X` should not affect Hotstring().
 
 	Var *clipboard_var = g_script.FindOrAddVar(_T("Clipboard")); // Add it if it doesn't exist, in case the script accesses "Clipboard" via a dynamic variable.
 	if (clipboard_var)

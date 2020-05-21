@@ -91,7 +91,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>wsock32.lib;winmm.lib;version.lib;comctl32.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>wsock32.lib;winmm.lib;version.lib;comctl32.lib;psapi.lib;wininet.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <StackReserveSize>4194304</StackReserveSize>
       <TerminalServerAware>false</TerminalServerAware>
       <DataExecutionPrevention>false</DataExecutionPrevention>
@@ -221,6 +221,7 @@
     <ClCompile Include="source\globaldata.cpp" />
     <ClCompile Include="source\hook.cpp" />
     <ClCompile Include="source\hotkey.cpp" />
+    <ClCompile Include="source\input_object.cpp" />
     <ClCompile Include="source\keyboard_mouse.cpp" />
     <ClCompile Include="source\mt19937ar-cok.cpp" />
     <ClCompile Include="source\os_version.cpp" />
@@ -256,6 +257,7 @@
     <ClInclude Include="source\globaldata.h" />
     <ClInclude Include="source\hook.h" />
     <ClInclude Include="source\hotkey.h" />
+    <ClInclude Include="source\input_object.h" />
     <ClInclude Include="source\keyboard_mouse.h" />
     <ClInclude Include="source\KuString.h" />
     <ClInclude Include="source\lib_pcre\pcre\pcret.h" />
@@ -329,6 +331,9 @@
       <LinkLibraryDependencies>true</LinkLibraryDependencies>
       <UseLibraryDependencyInputs>false</UseLibraryDependencyInputs>
     </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
+    <Natvis Include="debug.natvis" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
